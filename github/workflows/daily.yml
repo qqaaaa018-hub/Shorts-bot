@@ -1,0 +1,20 @@
+name: daily-short
+on:
+  schedule: [{cron: "0 5 * * *"}]
+  workflow_dispatch:
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: sudo apt-get install -y ffmpeg
+      - run: pip install edge-tts feedparser requests google-genai google-api-python-client google-auth
+      - run: python main.py
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+          PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH: ${{ secrets.YT_REFRESH }}
