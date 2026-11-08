@@ -17,7 +17,7 @@ Pick the single most interesting one. Write a YouTube Shorts script, 90-110 word
 strong hook in the first sentence, plain spoken English, no emojis, no stage directions,
 only claims supported by the headline. Return ONLY JSON:
 {{"title":"","script":"","keywords":["3-4 visual stock-footage search terms"],"description":"","tags":[]}}"""
-r = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+r = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
 d = json.loads(re.search(r"\{.*\}", r.text, re.S).group())
 
 # 3. VOICE + SUBTITLES
