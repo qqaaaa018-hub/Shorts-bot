@@ -6,6 +6,7 @@ import os
 import pathlib
 import random
 import subprocess
+import textwrap
 import time
 import urllib.parse
 
@@ -19,6 +20,8 @@ STORY_FILE = ROOT / "story.json"
 
 W, H, FPS = 720, 1280, 30
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+CAPTION_FONT_SIZE = 40
+CAPTION_WRAP = 18  # characters per line
 
 # Settings (override in the workflow's env block)
 VOICE = os.environ.get("TTS_VOICE", "en-US-GuyNeural")
@@ -31,8 +34,9 @@ GEMINI_MODELS = [
 PRIVACY = os.environ.get("YT_PRIVACY", "public")  # "private" if uploads are restricted
 DRY_RUN = os.environ.get("DRY_RUN") == "1"        # build the video but don't upload
 
-STYLE = ("2D cartoon illustration, bold clean outlines, bright flat colors, expressive faces, "
-         "vertical 9:16 composition, no text, no speech bubbles, no real people or brands")
+STYLE = ("3D animated cartoon, Pixar style, cute anthropomorphic animal characters with big "
+         "expressive eyes, bright colorful background, vertical 9:16 composition, cartoon comedy. "
+         "Not anime, not manga, not realistic photo. No text, no speech bubbles, no humans")
 
 
 # ---------- helpers ----------
@@ -70,11 +74,12 @@ def load_story():
 def build_prompt(story, n):
     recaps = [e["recap"] for e in story["episodes"][-3:]]
     bible = story.get("bible") or "none yet: invent it"
-    return f"""You write episode {n} of a cartoon mystery series for YouTube Shorts (about 35 seconds).
+    return f"""You write episode {n} of a funny cartoon series for YouTube Shorts (about 35 seconds).
+Stories feature talking cartoon animals and vehicles: rivalries, races, silly challenges, and a curious question that keeps the viewer watching. Characters are cartoon animals or cartoon vehicles only. No humans, no anime-style characters.
 Series bible (keep characters and look consistent; if none yet, create one): {bible}
 Recent episodes: {json.dumps(recaps)}
 Rules:
-- Scene 1 is a hook in the first 2 seconds: a question or strange fact that makes the viewer curious.
+- Scene 1 is a hook in the first 2 seconds: a question or a funny challenge that makes the viewer curious.
 - Each scene reveals one small new piece and opens a new question.
 - The final scene ends on a cliffhanger.
 - Original characters only. No real people, brands, existing cartoons, or song lyrics.
@@ -150,8 +155,9 @@ def build_scene(i, img, dur, cap_file):
     vf = (f"scale=1440:2560,"
           f"zoompan=z='min(zoom+0.0012,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
           f"d={frames}:s={W}x{H}:fps={FPS},"
-          f"drawtext=fontfile={FONT}:textfile={cap_file}:fontsize=54:fontcolor=white:"
-          f"borderw=4:bordercolor=black:x=(w-text_w)/2:y=h*0.78,format=yuv420p")
+          f"drawtext=fontfile={FONT}:textfile={cap_file}:fontsize={CAPTION_FONT_SIZE}:"
+          f"fontcolor=white:borderw=3:bordercolor=black:line_spacing=8:"
+          f"x=(w-text_w)/2:y=h*0.72,format=yuv420p")
     run(["ffmpeg", "-y", "-loop", "1", "-i", str(img), "-t", f"{dur:.2f}",
          "-vf", vf, "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
          "-an", str(clip)])
@@ -247,7 +253,7 @@ def main():
         fetch_image(f"{STYLE}. {bible}. {sc['image']}", img, seed_base + i)
         asyncio.run(make_tts(sc["narration"], raw))
         dur = max(3.0, duration(raw) + 0.4)
-        cap.write_text(sc["caption"])
+        cap.write_text(textwrap.fill(sc["caption"], width=CAPTION_WRAP))
         pad_audio(raw, aud, dur)
         clips.append(build_scene(i, img, dur, cap))
         audios.append(aud)
