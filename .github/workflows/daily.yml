@@ -1,30 +1,47 @@
-name: daily-short
+name: shorts-bot
+
 on:
-  schedule:
-    - cron: "0 5 * * *"
-    - cron: "0 11 * * *"
-    - cron: "0 17 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"    # 09:00 Dubai
+    - cron: "0 11 * * *"   # 15:00 Dubai
+    - cron: "0 17 * * *"   # 21:00 Dubai
+
 permissions:
   contents: write
+
 jobs:
-  make:
+  make-and-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: {python-version: "3.11"}
-      - run: sudo apt-get install -y ffmpeg fonts-dejavu-core
-      - run: pip install requests google-genai google-api-python-client google-auth
-      - run: python main.py
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg and fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Install Python packages
+        run: pip install requests edge-tts
+
+      - name: Build and upload episode
         env:
-          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+          TTS_VOICE: "en-US-ChristopherNeural"
+          TTS_PITCH: "-4Hz"
+          TTS_RATE: "+0%"
+          YT_REFRESH: ${{ secrets.YT_REFRESH }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH: ${{ secrets.YT_REFRESH }}
-      - run: |
-          git config user.name "bot"
-          git config user.email "bot@users.noreply.github.com"
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+        run: python main.py
+
+      - name: Save story progress
+        if: success()
+        run: |
+          git config user.name "shorts-bot"
+          git config user.email "shorts-bot@users.noreply.github.com"
           git add story.json
-          git commit -m "next episode" || exit 0
-          git push
+          git diff --cached --quiet || (git commit -m "save episode" && git push)
