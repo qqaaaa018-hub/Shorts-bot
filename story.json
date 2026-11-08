@@ -1,10 +1,1 @@
-{
-  "bible": "Style: 2D stylized noir cartoon with warm watercolor textures, paper cutout lighting, and muted teal and amber tones. Protagonist: Milo, a curious 14-year-old apprentice clockmaker with oversized brass round goggles, messy chestnut hair, and a brown wool vest. Companion: Pip, a silent clockwork ferret made of polished brass with glowing cyan crystal eyes. Setting: Oakhaven, a foggy mountain town filled with towering mechanical clock towers and winding cobblestone streets.",
-  "episodes": [
-    {
-      "n": 1,
-      "title": "Why Did Every Clock Freeze at 3:17?",
-      "recap": "Every clock in Oakhaven mysteriously stops at 3:17, leading Milo and Pip to find a glowing, frozen mechanical moth where the tower pendulum should be."
-    }
-  ]
-}
+{"bible": null, "episodes": []}
