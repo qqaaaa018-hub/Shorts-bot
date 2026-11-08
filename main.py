@@ -96,15 +96,22 @@ Return ONLY a JSON object with these keys:
 
 def gemini_json(prompt):
     key = os.environ["GEMINI_KEY"]
+    last_error = None
     for model in GEMINI_MODELS:
-        for attempt in range(4):
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                params={"key": key},
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"responseMimeType": "application/json",
-                                           "temperature": 1.0}},
-                timeout=180)
+        for attempt in range(5):
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": key},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"responseMimeType": "application/json",
+                                               "temperature": 1.0}},
+                    timeout=90)
+            except requests.RequestException as e:
+                last_error = e
+                print(f"{model} request failed ({type(e).__name__}), retrying")
+                time.sleep(20 * (attempt + 1))
+                continue
             if r.status_code == 200:
                 text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 return json.loads(text)
@@ -113,10 +120,10 @@ def gemini_json(prompt):
                 break
             if r.status_code in (429, 500, 503):
                 print(f"{model} busy ({r.status_code}), retrying")
-                time.sleep(15 * (attempt + 1))
+                time.sleep(20 * (attempt + 1))
                 continue
             r.raise_for_status()
-    raise RuntimeError("Gemini failed on all models")
+    raise RuntimeError(f"Gemini failed on all models: {last_error}")
 
 
 # ---------- pictures and voice ----------
