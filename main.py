@@ -4,8 +4,10 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-def run(c): subprocess.run(c, check=True)
-
+def run(c):
+    if c[0] == "ffmpeg":
+        c = ["ffmpeg", "-loglevel", "error", "-nostats"] + c[1:]
+    subprocess.run(c, check=True)
 # 1. TOPIC
 feed = feedparser.parse("https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en")
 heads = [e.title for e in feed.entries[:6]]
