@@ -189,4 +189,89 @@ def mix(video, narr, out):
 
 def yt_access_token():
     r = requests.post("https://oauth2.googleapis.com/token", data={
-        "client_id": os.environ["Y
+        "client_id": os.environ["YT_CLIENT_ID"],
+        "client_secret": os.environ["YT_CLIENT_SECRET"],
+        "refresh_token": os.environ["YT_REFRESH"],
+        "grant_type": "refresh_token"}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError("YouTube token refresh failed (" + r.text[:200] +
+                           "). Rerun get_token.py and update YT_REFRESH.")
+    return r.json()["access_token"]
+
+
+def upload(video, meta):
+    token = yt_access_token()
+    body = {
+        "snippet": {
+            "title": meta["title"][:95],
+            "description": meta["description"],
+            "tags": meta.get("tags", [])[:15],
+            "categoryId": "24",
+        },
+        "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
+    }
+    init = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/videos"
+        "?uploadType=resumable&part=snippet,status",
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json; charset=UTF-8",
+                 "X-Upload-Content-Type": "video/mp4",
+                 "X-Upload-Content-Length": str(os.path.getsize(video))},
+        data=json.dumps(body), timeout=60)
+    init.raise_for_status()
+    with open(video, "rb") as f:
+        up = requests.put(init.headers["Location"], data=f,
+                          headers={"Content-Type": "video/mp4"}, timeout=900)
+    up.raise_for_status()
+    return up.json()["id"]
+
+
+# ---------- main ----------
+
+def main():
+    WORK.mkdir(exist_ok=True)
+    story = load_story()
+    n = len(story["episodes"]) + 1
+
+    ep = gemini_json(build_prompt(story, n))
+    bible = ep.get("bible") or story.get("bible") or ""
+    seed_base = random.randint(1, 10**6)
+
+    clips, audios = [], []
+    for i, sc in enumerate(ep["scenes"]):
+        img = WORK / f"img{i}.jpg"
+        raw = WORK / f"tts{i}.mp3"
+        cap = WORK / f"cap{i}.txt"
+        aud = WORK / f"aud{i}.m4a"
+
+        fetch_image(f"{STYLE}. {bible}. {sc['image']}", img, seed_base + i)
+        asyncio.run(make_tts(sc["narration"], raw))
+        dur = max(3.0, duration(raw) + 0.4)
+        cap.write_text(sc["caption"])
+        pad_audio(raw, aud, dur)
+        clips.append(build_scene(i, img, dur, cap))
+        audios.append(aud)
+        print(f"scene {i + 1} ready ({dur:.1f}s)")
+
+    video_only = concat(clips, WORK / "video_only.mp4")
+    narr = concat(audios, WORK / "narration.m4a")
+    final = mix(video_only, narr, WORK / "final.mp4")
+
+    if not has_audio(final):
+        raise RuntimeError("final video has no audio track; not uploading")
+    print(f"built episode {n} ({duration(final):.1f}s, with audio)")
+
+    if DRY_RUN:
+        print("DRY_RUN=1: skipping upload and story save")
+        return
+
+    video_id = upload(final, ep)
+    print(f"uploaded https://youtu.be/{video_id}")
+
+    story["bible"] = bible
+    story["episodes"].append({"n": n, "title": ep["title"], "recap": ep["recap"]})
+    STORY_FILE.write_text(json.dumps(story, indent=2))
+
+
+if __name__ == "__main__":
+    main()
