@@ -5,6 +5,8 @@ on:
     - cron: "0 11 * * *"
     - cron: "0 17 * * *"
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   make:
     runs-on: ubuntu-latest
@@ -13,11 +15,16 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: sudo apt-get install -y ffmpeg fonts-dejavu-core
-      - run: pip install edge-tts feedparser requests google-genai google-api-python-client google-auth
+      - run: pip install requests google-genai google-api-python-client google-auth
       - run: python main.py
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
-          PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH: ${{ secrets.YT_REFRESH }}
+      - run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add story.json
+          git commit -m "next episode" || exit 0
+          git push
