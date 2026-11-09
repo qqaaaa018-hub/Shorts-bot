@@ -32,6 +32,7 @@ jobs:
           TTS_VOICE: "en-US-ChristopherNeural"
           TTS_PITCH: "-4Hz"
           TTS_RATE: "+0%"
+          DRY_RUN: "1"
           YT_REFRESH: ${{ secrets.YT_REFRESH }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
