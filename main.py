@@ -23,14 +23,11 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 CAPTION_FONT_SIZE = 40
 CAPTION_WRAP = 18  # characters per line
 
-# Settings (override in the workflow's env block)
+# Settings (override in the workflow's env block if you want)
 VOICE = os.environ.get("TTS_VOICE", "en-US-GuyNeural")
 TTS_PITCH = os.environ.get("TTS_PITCH", "+0Hz")
 TTS_RATE = os.environ.get("TTS_RATE", "+5%")
-GEMINI_MODELS = [
-    os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"),
-    os.environ.get("GEMINI_FALLBACK", "gemini-2.5-flash"),
-]
+GEMINI_MODEL_OVERRIDE = os.environ.get("GEMINI_MODEL")  # optional; leave unset for auto-pick
 PRIVACY = os.environ.get("YT_PRIVACY", "public")  # "private" if uploads are restricted
 DRY_RUN = os.environ.get("DRY_RUN") == "1"        # build the video but don't upload
 
@@ -94,11 +91,37 @@ Return ONLY a JSON object with these keys:
 "scenes" (list of objects with "narration", "caption", "image")."""
 
 
+def pick_gemini_models(key):
+    """Ask Google which models this key can use, and return the best text models to try."""
+    r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                     params={"key": key}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Could not list Gemini models ({r.status_code}): {r.text[:300]}")
+    available = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])]
+    print("models available to this key:", ", ".join(available) or "none")
+    if not available:
+        raise RuntimeError("This Gemini key has no models that can generate text.")
+
+    flash = [m for m in available
+             if "flash" in m and "lite" not in m and "image" not in m
+             and "tts" not in m and "live" not in m]
+    flash.sort(reverse=True)  # newer version numbers first, roughly
+    ordered = []
+    if GEMINI_MODEL_OVERRIDE and GEMINI_MODEL_OVERRIDE in available:
+        ordered.append(GEMINI_MODEL_OVERRIDE)
+    ordered += [m for m in flash if m not in ordered]
+    ordered += [m for m in available if m not in ordered and "pro" in m]
+    return ordered[:4]
+
+
 def gemini_json(prompt):
     key = os.environ["GEMINI_KEY"]
+    models = pick_gemini_models(key)
+    print("trying models in order:", ", ".join(models))
     last_error = None
-    for model in GEMINI_MODELS:
-        for attempt in range(5):
+    for model in models:
+        for attempt in range(3):
             try:
                 r = requests.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -106,23 +129,25 @@ def gemini_json(prompt):
                     json={"contents": [{"parts": [{"text": prompt}]}],
                           "generationConfig": {"responseMimeType": "application/json",
                                                "temperature": 1.0}},
-                    timeout=90)
+                    timeout=120)
             except requests.RequestException as e:
                 last_error = e
                 print(f"{model} request failed ({type(e).__name__}), retrying")
                 time.sleep(20 * (attempt + 1))
                 continue
             if r.status_code == 200:
+                print(f"story written by {model}")
                 text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 return json.loads(text)
             if r.status_code == 404:
-                print(f"model {model} not found, trying fallback")
+                print(f"{model} not available, trying next")
                 break
             if r.status_code in (429, 500, 503):
+                last_error = f"{r.status_code} {r.text[:200]}"
                 print(f"{model} busy ({r.status_code}), retrying")
                 time.sleep(20 * (attempt + 1))
                 continue
-            r.raise_for_status()
+            raise RuntimeError(f"Gemini error {r.status_code}: {r.text[:300]}")
     raise RuntimeError(f"Gemini failed on all models: {last_error}")
 
 
