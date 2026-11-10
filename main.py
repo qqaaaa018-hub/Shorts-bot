@@ -134,41 +134,72 @@ Rules:
     return data
 
 
-# ============================ GEMINI IMAGES ============================
-def gen_image(scene, idx, path):
-    prompt = "%s. %s. Scene: %s" % (STYLE, LOOKS[scene["type"]], scene["image"])
-    for attempt in range(3):
-        for m in IMAGE_MODELS:
-            try:
+# ============================ IMAGES ============================
+GEMINI_IMG_OK = True     # switched off for the rest of the run if the key has no image quota
+SHORT_STYLE = ("vintage hand-drawn 1930s-40s cartoon illustration, clean ink outlines, "
+               "grainy film texture, vertical composition, no text, no letters")
+
+
+def gemini_image(prompt, path):
+    for m in IMAGE_MODELS:
+        try:
+            r = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                params={"key": API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"responseModalities": ["IMAGE"],
+                                           "imageConfig": {"aspectRatio": "9:16"}}},
+                timeout=120)
+            if r.status_code == 400 and "imageConfig" in r.text:
                 r = requests.post(
                     "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
                     params={"key": API_KEY},
                     json={"contents": [{"parts": [{"text": prompt}]}],
-                          "generationConfig": {"responseModalities": ["IMAGE"],
-                                               "imageConfig": {"aspectRatio": "9:16"}}},
+                          "generationConfig": {"responseModalities": ["IMAGE"]}},
                     timeout=120)
-                if r.status_code in (429, 500, 503):
-                    log("  image busy %s %s" % (m, r.status_code))
-                    continue
-                if r.status_code == 400 and "imageConfig" in r.text:
-                    # model without aspect ratio support: retry plain
-                    r = requests.post(
-                        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
-                        params={"key": API_KEY},
-                        json={"contents": [{"parts": [{"text": prompt}]}],
-                              "generationConfig": {"responseModalities": ["IMAGE"]}},
-                        timeout=120)
-                r.raise_for_status()
-                for part in r.json()["candidates"][0]["content"]["parts"]:
-                    inline = part.get("inlineData") or part.get("inline_data")
-                    if inline and inline.get("data"):
-                        with open(path, "wb") as f:
-                            f.write(base64.b64decode(inline["data"]))
-                        return True
-            except Exception as e:
-                log("  image error %s: %s" % (m, str(e)[:120]))
-        time.sleep(8 * (attempt + 1) + random.uniform(0, 3))
+            if r.status_code != 200:
+                log("  gemini image %s -> %s" % (m, r.status_code))
+                continue
+            for part in r.json()["candidates"][0]["content"]["parts"]:
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    with open(path, "wb") as f:
+                        f.write(base64.b64decode(inline["data"]))
+                    return True
+        except Exception as e:
+            log("  gemini image error %s: %s" % (m, str(e)[:100]))
     return False
+
+
+def pollinations_image(scene, idx, path):
+    import urllib.parse
+    prompt = "%s, %s, %s" % (scene["image"], LOOKS[scene["type"]], SHORT_STYLE)
+    prompt = prompt[:700]
+    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
+           "?width=%d&height=%d&nologo=true&model=flux&seed=%d" % (W, H, 1000 + idx))
+    for attempt in range(5):
+        try:
+            r = requests.get(url, timeout=180)
+            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+                with open(path, "wb") as f:
+                    f.write(r.content)
+                return True
+            log("  pollinations -> %s" % r.status_code)
+        except Exception as e:
+            log("  pollinations error: %s" % str(e)[:100])
+        time.sleep(6 * (attempt + 1))
+    return False
+
+
+def gen_image(scene, idx, path):
+    global GEMINI_IMG_OK
+    if GEMINI_IMG_OK:
+        prompt = "%s. %s. Scene: %s" % (STYLE, LOOKS[scene["type"]], scene["image"])
+        if gemini_image(prompt, path):
+            return True
+        GEMINI_IMG_OK = False
+        log("  Gemini images unavailable (quota?), using Pollinations for the rest of this run")
+    return pollinations_image(scene, idx, path)
 
 
 # ============================ VOICE ============================
