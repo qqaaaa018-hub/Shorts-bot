@@ -2,6 +2,15 @@ name: shorts-bot
 
 on:
   workflow_dispatch:
+    inputs:
+      topic:
+        description: "Topic (empty = Gemini picks)"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 = build only, 0 = upload to YouTube"
+        required: false
+        default: "1"
   schedule:
     - cron: "0 5 * * *"    # 09:00 Dubai
     - cron: "0 11 * * *"   # 15:00 Dubai
@@ -32,17 +41,29 @@ jobs:
           TTS_VOICE: "en-US-ChristopherNeural"
           TTS_PITCH: "-4Hz"
           TTS_RATE: "+0%"
-          DRY_RUN: "1"
+          TOPIC: ${{ github.event.inputs.topic }}
+          # manual runs follow the dry_run input (default 1); scheduled runs upload
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
           YT_REFRESH: ${{ secrets.YT_REFRESH }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
         run: python main.py
 
+      - name: Keep the video file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-video
+          path: |
+            output/video.mp4
+            output/meta.json
+          if-no-files-found: ignore
+
       - name: Save story progress
         if: success()
         run: |
           git config user.name "shorts-bot"
           git config user.email "shorts-bot@users.noreply.github.com"
-          git add story.json
+          if [ -f story.json ]; then git add story.json; fi
           git diff --cached --quiet || (git commit -m "save episode" && git push)
