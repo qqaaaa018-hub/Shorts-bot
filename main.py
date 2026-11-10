@@ -1,230 +1,286 @@
-"""Shorts-bot: cartoon curiosity serial with narration and background music.
-Builds one episode per run and uploads it as a YouTube Short."""
-import asyncio
-import json
-import os
-import pathlib
-import random
-import subprocess
-import textwrap
-import time
-import urllib.parse
+#!/usr/bin/env python3
+"""
+Vintage-cartoon "talking cat" Shorts generator.
 
-import edge_tts
+Pipeline:  Gemini (script + scene prompts) -> Gemini image model (art)
+           -> edge-tts (voice + word timings) -> ffmpeg (Ken Burns + word captions)
+
+Then uploads to YouTube Shorts and records the episode in story.json.
+
+Env (same secret names as the old bot):
+  GEMINI_KEY, YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH
+Optional: TOPIC, YT_PRIVACY (public/private), DRY_RUN=1 (build only, no upload),
+          TTS_VOICE, TTS_RATE
+Run:     python main.py            (Gemini picks a fresh topic)
+         python main.py "why sleeping 8 hours is a myth"
+Needs:   pip install requests edge-tts   (+ ffmpeg and DejaVu fonts)
+"""
+import os, sys, json, time, random, base64, asyncio, subprocess, re, shutil, pathlib
 import requests
 
+# ============================ CONFIG ============================
 ROOT = pathlib.Path(__file__).resolve().parent
-WORK = ROOT / "work"
-MUSIC_DIR = ROOT / "music"
+API_KEY = os.environ.get("GEMINI_KEY") or os.environ.get("GEMINI_API_KEY", "")
 STORY_FILE = ROOT / "story.json"
-
+MUSIC_DIR = ROOT / "music"
+PRIVACY = os.environ.get("YT_PRIVACY", "public")
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
+TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
+IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
+VOICE = os.environ.get("TTS_VOICE", "en-US-AndrewNeural")   # or en-US-GuyNeural, en-GB-RyanNeural
+VOICE_RATE = os.environ.get("TTS_RATE", "+8%")
+VOICE_PITCH = os.environ.get("TTS_PITCH", "+0Hz")
 W, H, FPS = 720, 1280, 30
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-CAPTION_FONT_SIZE = 40
-CAPTION_WRAP = 18  # characters per line
+OUT = str(ROOT / "output")
+PAD = 0.25                          # silence after each scene (seconds)
+CAPTION_FONT = "DejaVu Serif"
+CAPTION_SIZE = 84
+CAPTION_MARGIN_V = 330              # distance from bottom
 
-# Settings (override in the workflow's env block if you want)
-VOICE = os.environ.get("TTS_VOICE", "en-US-GuyNeural")
-TTS_PITCH = os.environ.get("TTS_PITCH", "+0Hz")
-TTS_RATE = os.environ.get("TTS_RATE", "+5%")
-GEMINI_MODEL_OVERRIDE = os.environ.get("GEMINI_MODEL")  # optional; leave unset for auto-pick
-PRIVACY = os.environ.get("YT_PRIVACY", "public")  # "private" if uploads are restricted
-DRY_RUN = os.environ.get("DRY_RUN") == "1"        # build the video but don't upload
+CAT = ("a grey anthropomorphic cat narrator wearing a grey fedora hat, dark green three-piece "
+       "suit, white shirt and a dark red tie, expressive eyes")
 
-STYLE = ("3D animated cartoon, Pixar style, cute anthropomorphic animal characters with big "
-         "expressive eyes, bright colorful background, vertical 9:16 composition, cartoon comedy. "
-         "Not anime, not manga, not realistic photo. No text, no speech bubbles, no humans")
+STYLE = ("vintage hand-drawn 1930s-40s cartoon illustration, clean ink outlines, grainy film "
+         "texture, soft vignette, vertical 9:16 composition, NO text, NO letters, NO captions, "
+         "NO watermark")
 
-
-# ---------- helpers ----------
-
-def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode:
-        raise RuntimeError("ffmpeg failed: " + p.stderr[-800:])
+LOOKS = {
+    "cat":     "warm amber and deep red lighting, cozy vintage room, full color. Character: " + CAT,
+    "story":   "sepia black-and-white storybook scene, soft shading, dramatic candle or window light",
+    "chalk":   "black chalkboard background, white chalk line-art diagram with a hand pointing a stick, "
+               "simple icons (clock, magnifying glass, numbers), no words",
+    "collage": "cream paper background, sticker-style paper cutouts and icons arranged as a collage, "
+               "soft pastel tones, one central character",
+}
 
 
-def duration(path):
-    out = subprocess.run(
+def log(*a):
+    print(*a, flush=True)
+
+
+# ============================ GEMINI TEXT ============================
+def gemini_json(prompt, rounds=4):
+    last = None
+    for rnd in range(rounds):
+        for m in TEXT_MODELS:
+            try:
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                    params={"key": API_KEY},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"responseMimeType": "application/json",
+                                               "temperature": 0.9}},
+                    timeout=90)
+                if r.status_code in (429, 500, 503):
+                    last = "%s %s: %s" % (m, r.status_code, r.text[:160])
+                    log("  busy:", last)
+                    continue
+                r.raise_for_status()
+                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
+                return json.loads(txt)
+            except Exception as e:
+                last = "%s: %s" % (m, e)
+        wait = min(20 * 2 ** rnd, 120) + random.uniform(0, 5)
+        log("  all models busy, waiting %ds (round %d/%d)" % (wait, rnd + 1, rounds))
+        time.sleep(wait)
+    raise RuntimeError("Gemini text failed: %s" % last)
+
+
+def write_script(topic, story):
+    used = [e.get("title", "") for e in story.get("episodes", [])][-40:]
+    if not topic:
+        topic = ("pick a fresh surprising myth or curiosity (history, psychology, science, habits). "
+                 "Do NOT repeat these earlier videos: %s" % json.dumps(used))
+    prompt = """You write viral 60-second YouTube Shorts in the style of a curious grey cat detective
+who busts myths. Topic: "%s"
+
+Return ONLY JSON:
+{
+ "title": "catchy title under 70 chars",
+ "description": "1-2 sentence description ending with #Shorts",
+ "tags": ["history", "psychology", ...],
+ "recap": "one sentence summary of this episode",
+ "scenes": [
+   {"type": "cat|story|chalk|collage",
+    "narration": "1-2 short spoken sentences",
+    "image": "visual description of the scene, no text in image"}
+ ]
+}
+
+Rules:
+- 10 to 12 scenes, total narration 140-165 words (about 60 seconds spoken).
+- Scene 1 type "cat": a shocking hook question that makes people stay.
+- Last scene type "cat": a punchy conclusion plus a question to the viewer.
+- "story" scenes tell a short human example (a man, a bed, a clock, a village...).
+- Use 1-2 "chalk" scenes for the explanation / numbers, and 1 "collage" scene for the evidence.
+- Simple spoken English, no emojis, no stage directions in narration.
+- Image descriptions describe ONLY the picture (characters, setting, action, mood).""" % topic
+    data = gemini_json(prompt)
+    scenes = data["scenes"]
+    if "#Shorts" not in data.get("description", ""):
+        data["description"] = data.get("description", "") + " #Shorts"
+    for s in scenes:
+        if s.get("type") not in LOOKS:
+            s["type"] = "story"
+    return data
+
+
+# ============================ GEMINI IMAGES ============================
+def gen_image(scene, idx, path):
+    prompt = "%s. %s. Scene: %s" % (STYLE, LOOKS[scene["type"]], scene["image"])
+    for attempt in range(3):
+        for m in IMAGE_MODELS:
+            try:
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                    params={"key": API_KEY},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"responseModalities": ["IMAGE"],
+                                               "imageConfig": {"aspectRatio": "9:16"}}},
+                    timeout=120)
+                if r.status_code in (429, 500, 503):
+                    log("  image busy %s %s" % (m, r.status_code))
+                    continue
+                if r.status_code == 400 and "imageConfig" in r.text:
+                    # model without aspect ratio support: retry plain
+                    r = requests.post(
+                        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                        params={"key": API_KEY},
+                        json={"contents": [{"parts": [{"text": prompt}]}],
+                              "generationConfig": {"responseModalities": ["IMAGE"]}},
+                        timeout=120)
+                r.raise_for_status()
+                for part in r.json()["candidates"][0]["content"]["parts"]:
+                    inline = part.get("inlineData") or part.get("inline_data")
+                    if inline and inline.get("data"):
+                        with open(path, "wb") as f:
+                            f.write(base64.b64decode(inline["data"]))
+                        return True
+            except Exception as e:
+                log("  image error %s: %s" % (m, str(e)[:120]))
+        time.sleep(8 * (attempt + 1) + random.uniform(0, 3))
+    return False
+
+
+# ============================ VOICE ============================
+async def _tts(text, mp3_path):
+    import edge_tts
+    comm = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH, boundary="WordBoundary")
+    words = []
+    with open(mp3_path, "wb") as f:
+        async for ch in comm.stream():
+            if ch["type"] == "audio":
+                f.write(ch["data"])
+            elif ch["type"] == "WordBoundary":
+                start = ch["offset"] / 1e7
+                words.append((ch["text"], start, start + ch["duration"] / 1e7))
+    return words
+
+
+def make_voice(text, mp3_path):
+    for attempt in range(3):
+        try:
+            words = asyncio.run(_tts(text, mp3_path))
+            if words:
+                return words
+        except Exception as e:
+            log("  tts error:", str(e)[:120])
+        time.sleep(3)
+    raise RuntimeError("TTS failed for: " + text[:50])
+
+
+def probe_duration(path):
+    out = subprocess.check_output(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, check=True).stdout
+         "-of", "default=nw=1:nk=1", path])
     return float(out.strip())
 
 
-def has_audio(path):
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a",
-         "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True).stdout
-    return "audio" in out
+# ============================ VIDEO ============================
+def run(cmd):
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg failed:\n" + r.stderr[-1500:])
 
 
-# ---------- story ----------
-
-def load_story():
-    if STORY_FILE.exists():
-        return json.loads(STORY_FILE.read_text())
-    return {"bible": None, "episodes": []}
-
-
-def build_prompt(story, n):
-    recaps = [e["recap"] for e in story["episodes"][-3:]]
-    bible = story.get("bible") or "none yet: invent it"
-    return f"""You write episode {n} of a funny cartoon series for YouTube Shorts (about 35 seconds).
-Stories feature talking cartoon animals and vehicles: rivalries, races, silly challenges, and a curious question that keeps the viewer watching. Characters are cartoon animals or cartoon vehicles only. No humans, no anime-style characters.
-Series bible (keep characters and look consistent; if none yet, create one): {bible}
-Recent episodes: {json.dumps(recaps)}
-Rules:
-- Scene 1 is a hook in the first 2 seconds: a question or a funny challenge that makes the viewer curious.
-- Each scene reveals one small new piece and opens a new question.
-- The final scene ends on a cliffhanger.
-- Original characters only. No real people, brands, existing cartoons, or song lyrics.
-- Make 6 to 8 scenes. Narration: 8 to 14 words per scene, simple spoken English.
-- caption: under 6 words, shown on screen. image: a concrete picture of this moment, with no text in it.
-Return ONLY a JSON object with these keys:
-"title" (under 60 characters, curiosity-driven, no spoilers),
-"description" (two sentences, ending with #Shorts),
-"tags" (list of strings),
-"bible" (string describing characters and visual look; repeat the given one if it exists),
-"recap" (one sentence summarizing this episode),
-"scenes" (list of objects with "narration", "caption", "image")."""
+def scene_clip(img, mp3, dur, idx, out_path):
+    frames = int(dur * FPS) + 1
+    if idx % 2 == 0:   # slow zoom in
+        z = "min(zoom+0.0007,1.18)"
+    else:              # slow zoom out
+        z = "if(eq(on,0),1.18,max(zoom-0.0007,1.0))"
+    vf = ("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+          "zoompan=z='%s':d=%d:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=%dx%d:fps=%d,"
+          "format=yuv420p") % (z, frames, W, H, FPS)
+    run(["ffmpeg", "-y", "-v", "error", "-i", img, "-i", mp3,
+         "-vf", vf, "-af", "apad=pad_dur=%f" % (PAD + 0.5),
+         "-t", "%.3f" % dur,
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2", out_path])
 
 
-def pick_gemini_models(key):
-    """Ask Google which models this key can use, and return the best text models to try."""
-    r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
-                     params={"key": key}, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"Could not list Gemini models ({r.status_code}): {r.text[:300]}")
-    available = [m["name"].split("/")[-1] for m in r.json().get("models", [])
-                 if "generateContent" in m.get("supportedGenerationMethods", [])]
-    print("models available to this key:", ", ".join(available) or "none")
-    if not available:
-        raise RuntimeError("This Gemini key has no models that can generate text.")
-
-    flash = [m for m in available
-             if "flash" in m and "lite" not in m and "image" not in m
-             and "tts" not in m and "live" not in m]
-    flash.sort(reverse=True)  # newer version numbers first, roughly
-    ordered = []
-    if GEMINI_MODEL_OVERRIDE and GEMINI_MODEL_OVERRIDE in available:
-        ordered.append(GEMINI_MODEL_OVERRIDE)
-    ordered += [m for m in flash if m not in ordered]
-    ordered += [m for m in available if m not in ordered and "pro" in m]
-    return ordered[:4]
+def ass_time(t):
+    h = int(t // 3600); m = int(t % 3600 // 60); s = t % 60
+    return "%d:%02d:%05.2f" % (h, m, s)
 
 
-def gemini_json(prompt):
-    key = os.environ["GEMINI_KEY"]
-    models = pick_gemini_models(key)
-    print("trying models in order:", ", ".join(models))
-    last_error = None
-    for model in models:
-        for attempt in range(3):
-            try:
-                r = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    params={"key": key},
-                    json={"contents": [{"parts": [{"text": prompt}]}],
-                          "generationConfig": {"responseMimeType": "application/json",
-                                               "temperature": 1.0}},
-                    timeout=120)
-            except requests.RequestException as e:
-                last_error = e
-                print(f"{model} request failed ({type(e).__name__}), retrying")
-                time.sleep(20 * (attempt + 1))
-                continue
-            if r.status_code == 200:
-                print(f"story written by {model}")
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text)
-            if r.status_code == 404:
-                print(f"{model} not available, trying next")
-                break
-            if r.status_code in (429, 500, 503):
-                last_error = f"{r.status_code} {r.text[:200]}"
-                print(f"{model} busy ({r.status_code}), retrying")
-                time.sleep(20 * (attempt + 1))
-                continue
-            raise RuntimeError(f"Gemini error {r.status_code}: {r.text[:300]}")
-    raise RuntimeError(f"Gemini failed on all models: {last_error}")
+def write_ass(all_words, path):
+    """all_words: list of (text, start, end) in global time. One word on screen at a time."""
+    head = ("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nWrapStyle: 2\n\n"
+            "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,"
+            "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,"
+            "Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
+            "Style: W,%s,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,40,40,%d,1\n\n"
+            "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
+            % (W, H, CAPTION_FONT, CAPTION_SIZE, CAPTION_MARGIN_V))
+    lines = []
+    for i, (txt, st, en) in enumerate(all_words):
+        end = all_words[i + 1][1] if i + 1 < len(all_words) and all_words[i + 1][1] - en < 0.4 else en + 0.15
+        clean = txt.replace("{", "").replace("}", "").replace("\\", "")
+        lines.append("Dialogue: 0,%s,%s,W,,0,0,0,,%s" % (ass_time(st), ass_time(end), clean))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(head + "\n".join(lines) + "\n")
 
 
-# ---------- pictures and voice ----------
-
-def fetch_image(prompt, path, seed):
-    prompt = prompt[:600]  # keep the URL a reasonable length
-    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
-           f"?width={W}&height={H}&nologo=true&seed={seed}")
-    for attempt in range(5):
-        try:
-            r = requests.get(url, timeout=180)
-            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-                path.write_bytes(r.content)
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(5 * (attempt + 1))
-    raise RuntimeError("image generation failed after 5 tries")
-
-
-async def make_tts(text, path):
-    await edge_tts.Communicate(text, VOICE, rate=TTS_RATE, pitch=TTS_PITCH).save(str(path))
-
-
-def pad_audio(src, dst, dur):
-    run(["ffmpeg", "-y", "-i", str(src),
-         "-af", f"apad,atrim=0:{dur:.2f}", "-ar", "44100", "-ac", "2",
-         "-c:a", "aac", "-b:a", "128k", str(dst)])
+def build_video(scenes, workdir, final_path):
+    """scenes: list of dict(img, mp3, words, dur)."""
+    clips, all_words, t0 = [], [], 0.0
+    for i, s in enumerate(scenes):
+        clip = os.path.join(workdir, "clip_%02d.mp4" % i)
+        scene_clip(s["img"], s["mp3"], s["dur"], i, clip)
+        clips.append(clip)
+        for (w, a, b) in s["words"]:
+            all_words.append((w, t0 + a, t0 + b))
+        t0 += s["dur"]
+    lst = os.path.join(workdir, "list.txt")
+    with open(lst, "w") as f:
+        for c in clips:
+            f.write("file '%s'\n" % os.path.basename(c))
+    joined = os.path.join(workdir, "joined.mp4")
+    run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", joined])
+    write_ass(all_words, os.path.join(workdir, "captions.ass"))
+    run(["ffmpeg", "-y", "-v", "error", "-i", joined, "-vf",
+         "ass=%s" % os.path.join(workdir, "captions.ass"),
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy",
+         "-movflags", "+faststart", final_path])
 
 
-# ---------- video ----------
-
-def build_scene(i, img, dur, cap_file):
-    frames = round(dur * FPS)
-    clip = WORK / f"clip{i}.mp4"
-    vf = (f"scale=1440:2560,"
-          f"zoompan=z='min(zoom+0.0012,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-          f"d={frames}:s={W}x{H}:fps={FPS},"
-          f"drawtext=fontfile={FONT}:textfile={cap_file}:fontsize={CAPTION_FONT_SIZE}:"
-          f"fontcolor=white:borderw=3:bordercolor=black:line_spacing=8:"
-          f"x=(w-text_w)/2:y=h*0.72,format=yuv420p")
-    run(["ffmpeg", "-y", "-loop", "1", "-i", str(img), "-t", f"{dur:.2f}",
-         "-vf", vf, "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
-         "-an", str(clip)])
-    return clip
-
-
-def concat(files, out):
-    lst = WORK / (out.stem + ".txt")
-    lst.write_text("".join(f"file '{f.resolve()}'\n" for f in files))
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
-    return out
-
-
-def mix(video, narr, out):
-    total = duration(video)
+def add_music(video, out):
     tracks = sorted(MUSIC_DIR.glob("*.mp3")) if MUSIC_DIR.exists() else []
-    if tracks:
-        music = random.choice(tracks)
-        fc = ("[2:a]volume=0.10[m];[1:a]volume=1.0[n];"
-              "[n][m]amix=inputs=2:duration=first:dropout_transition=0[a]")
-        cmd = ["ffmpeg", "-y", "-i", str(video), "-i", str(narr),
-               "-stream_loop", "-1", "-i", str(music),
-               "-filter_complex", fc, "-map", "0:v", "-map", "[a]"]
-    else:
-        print("no music tracks in music/, using narration only")
-        cmd = ["ffmpeg", "-y", "-i", str(video), "-i", str(narr),
-               "-map", "0:v", "-map", "1:a"]
-    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-            "-t", f"{total:.2f}", "-movflags", "+faststart", str(out)]
-    run(cmd)
-    return out
+    if not tracks:
+        log("   no music/*.mp3 found, narration only")
+        shutil.copy(video, out)
+        return
+    music = random.choice(tracks)
+    run(["ffmpeg", "-y", "-v", "error", "-i", video, "-stream_loop", "-1", "-i", str(music),
+         "-filter_complex",
+         "[1:a]volume=0.10[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]",
+         "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+         "-movflags", "+faststart", out])
 
 
-# ---------- upload ----------
-
+# ============================ YOUTUBE ============================
 def yt_access_token():
     r = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": os.environ["YT_CLIENT_ID"],
@@ -240,18 +296,14 @@ def yt_access_token():
 def upload(video, meta):
     token = yt_access_token()
     body = {
-        "snippet": {
-            "title": meta["title"][:95],
-            "description": meta["description"],
-            "tags": meta.get("tags", [])[:15],
-            "categoryId": "24",
-        },
+        "snippet": {"title": meta["title"][:95], "description": meta["description"],
+                    "tags": meta.get("tags", [])[:15], "categoryId": "24"},
         "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
     }
     init = requests.post(
         "https://www.googleapis.com/upload/youtube/v3/videos"
         "?uploadType=resumable&part=snippet,status",
-        headers={"Authorization": f"Bearer {token}",
+        headers={"Authorization": "Bearer " + token,
                  "Content-Type": "application/json; charset=UTF-8",
                  "X-Upload-Content-Type": "video/mp4",
                  "X-Upload-Content-Length": str(os.path.getsize(video))},
@@ -264,50 +316,71 @@ def upload(video, meta):
     return up.json()["id"]
 
 
-# ---------- main ----------
+def load_story():
+    if STORY_FILE.exists():
+        return json.loads(STORY_FILE.read_text())
+    return {"bible": None, "episodes": []}
 
+
+# ============================ MAIN ============================
 def main():
-    WORK.mkdir(exist_ok=True)
+    if not API_KEY:
+        sys.exit("Set GEMINI_KEY")
+    topic = " ".join(sys.argv[1:]).strip() or os.environ.get("TOPIC", "").strip()
     story = load_story()
     n = len(story["episodes"]) + 1
+    work = os.path.join(OUT, "work")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
 
-    ep = gemini_json(build_prompt(story, n))
-    bible = ep.get("bible") or story.get("bible") or ""
-    seed_base = random.randint(1, 10**6)
+    log("1/4 writing script for:", topic)
+    data = write_script(topic, story)
+    scenes = data["scenes"]
+    log("   %d scenes, title: %s" % (len(scenes), data.get("title")))
 
-    clips, audios = [], []
-    for i, sc in enumerate(ep["scenes"]):
-        img = WORK / f"img{i}.jpg"
-        raw = WORK / f"tts{i}.mp3"
-        cap = WORK / f"cap{i}.txt"
-        aud = WORK / f"aud{i}.m4a"
+    log("2/4 generating images")
+    prev = None
+    for i, s in enumerate(scenes):
+        path = os.path.join(work, "img_%02d.png" % i)
+        ok = gen_image(s, i, path)
+        if not ok:
+            if prev:
+                log("   scene %d: image failed, reusing previous" % i)
+                shutil.copy(prev, path)
+            else:
+                sys.exit("First image failed; check API key / image model access.")
+        s["img"] = path
+        prev = path
+        log("   image %d/%d" % (i + 1, len(scenes)))
+        time.sleep(1.5)
 
-        fetch_image(f"{STYLE}. {bible}. {sc['image']}", img, seed_base + i)
-        asyncio.run(make_tts(sc["narration"], raw))
-        dur = max(3.0, duration(raw) + 0.4)
-        cap.write_text(textwrap.fill(sc["caption"], width=CAPTION_WRAP))
-        pad_audio(raw, aud, dur)
-        clips.append(build_scene(i, img, dur, cap))
-        audios.append(aud)
-        print(f"scene {i + 1} ready ({dur:.1f}s)")
+    log("3/4 generating voice")
+    for i, s in enumerate(scenes):
+        mp3 = os.path.join(work, "voice_%02d.mp3" % i)
+        s["words"] = make_voice(s["narration"], mp3)
+        s["mp3"] = mp3
+        s["dur"] = probe_duration(mp3) + PAD
 
-    video_only = concat(clips, WORK / "video_only.mp4")
-    narr = concat(audios, WORK / "narration.m4a")
-    final = mix(video_only, narr, WORK / "final.mp4")
+    log("4/4 rendering video")
+    captioned = os.path.join(work, "captioned.mp4")
+    build_video(scenes, work, captioned)
+    final = os.path.join(OUT, "video.mp4")
+    add_music(captioned, final)
 
-    if not has_audio(final):
-        raise RuntimeError("final video has no audio track; not uploading")
-    print(f"built episode {n} ({duration(final):.1f}s, with audio)")
+    meta = {"title": data.get("title"), "description": data.get("description"),
+            "tags": data.get("tags", [])}
+    with open(os.path.join(OUT, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    total = sum(s["dur"] for s in scenes)
+    log("built episode %d: %s (%.1fs)" % (n, final, total))
 
     if DRY_RUN:
-        print("DRY_RUN=1: skipping upload and story save")
+        log("DRY_RUN=1: skipping upload and story save")
         return
-
-    video_id = upload(final, ep)
-    print(f"uploaded https://youtu.be/{video_id}")
-
-    story["bible"] = bible
-    story["episodes"].append({"n": n, "title": ep["title"], "recap": ep["recap"]})
+    video_id = upload(final, data)
+    log("uploaded https://youtu.be/%s" % video_id)
+    story["bible"] = CAT
+    story["episodes"].append({"n": n, "title": data.get("title", ""), "recap": data.get("recap", "")})
     STORY_FILE.write_text(json.dumps(story, indent=2))
 
 
