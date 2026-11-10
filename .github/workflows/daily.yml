@@ -8,9 +8,9 @@ on:
         required: false
         default: ""
       dry_run:
-        description: "1 = build only, 0 = upload to YouTube"
+        description: "0 = upload to YouTube, 1 = build only (test)"
         required: false
-        default: "1"
+        default: "0"
   schedule:
     - cron: "0 5 * * *"    # 09:00 Dubai
     - cron: "0 11 * * *"   # 15:00 Dubai
