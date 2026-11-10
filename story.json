@@ -1,1 +1,10 @@
-
+{
+  "bible": "a grey anthropomorphic cat narrator wearing a grey fedora hat, dark green three-piece suit, white shirt and a dark red tie, expressive eyes",
+  "episodes": [
+    {
+      "n": 1,
+      "title": "The Myth of the Five Second Rule",
+      "recap": "Bacteria do not wait for a timer, so your dropped snack is contaminated the instant it hits the floor."
+    }
+  ]
+}
