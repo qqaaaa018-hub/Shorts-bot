@@ -317,8 +317,12 @@ def upload(video, meta):
 
 
 def load_story():
-    if STORY_FILE.exists():
-        return json.loads(STORY_FILE.read_text())
+    try:
+        data = json.loads(STORY_FILE.read_text())
+        if isinstance(data, dict) and isinstance(data.get("episodes"), list):
+            return data
+    except Exception:
+        pass   # missing, empty or broken file: start fresh
     return {"bible": None, "episodes": []}
 
 
