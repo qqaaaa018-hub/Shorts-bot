@@ -25,7 +25,8 @@ STORY_FILE = ROOT / "story.json"
 MUSIC_DIR = ROOT / "music"
 PRIVACY = os.environ.get("YT_PRIVACY", "public")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
-TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
+TEXT_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite",
+               "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-pro"]
 IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
 VOICE = os.environ.get("TTS_VOICE", "en-US-AndrewNeural")   # or en-US-GuyNeural, en-GB-RyanNeural
 VOICE_RATE = os.environ.get("TTS_RATE", "+8%")
@@ -59,7 +60,7 @@ def log(*a):
 
 
 # ============================ GEMINI TEXT ============================
-def gemini_json(prompt, rounds=4):
+def gemini_json(prompt, rounds=6):
     last = None
     for rnd in range(rounds):
         for m in TEXT_MODELS:
@@ -71,17 +72,24 @@ def gemini_json(prompt, rounds=4):
                           "generationConfig": {"responseMimeType": "application/json",
                                                "temperature": 0.9}},
                     timeout=90)
-                if r.status_code in (429, 500, 503):
-                    last = "%s %s: %s" % (m, r.status_code, r.text[:160])
-                    log("  busy:", last)
-                    continue
-                r.raise_for_status()
-                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-                return json.loads(txt)
             except Exception as e:
                 last = "%s: %s" % (m, e)
-        wait = min(20 * 2 ** rnd, 120) + random.uniform(0, 5)
+                log("  %s error: %s" % (m, str(e)[:100]))
+                continue
+            if r.status_code == 200:
+                try:
+                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
+                    data = json.loads(txt)
+                    log("  script written by", m)
+                    return data
+                except Exception as e:
+                    last = "%s bad output: %s" % (m, e)
+                    log("  %s returned unusable output, next" % m)
+                    continue
+            last = "%s %s: %s" % (m, r.status_code, r.text[:120].replace("\n", " "))
+            log("  %s -> %s" % (m, r.status_code))
+        wait = min(30 * (rnd + 1), 150) + random.uniform(0, 5)
         log("  all models busy, waiting %ds (round %d/%d)" % (wait, rnd + 1, rounds))
         time.sleep(wait)
     raise RuntimeError("Gemini text failed: %s" % last)
@@ -390,4 +398,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-                                          
