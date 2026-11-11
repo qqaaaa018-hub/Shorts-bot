@@ -9,8 +9,8 @@ Then uploads to YouTube Shorts and records the episode in story.json.
 
 Env (same secret names as the old bot):
   GEMINI_KEY, YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH
-Optional: TOPIC, YT_PRIVACY (public/private), DRY_RUN=1 (build only, no upload),
-          TTS_VOICE, TTS_RATE
+Optional: VIDEO_LANG (en / hi / ml, default en), TOPIC, YT_PRIVACY (public/private),
+          DRY_RUN=1 (build only, no upload), TTS_VOICE, TTS_RATE, TTS_PITCH
 Run:     python main.py            (Gemini picks a fresh topic)
          python main.py "why sleeping 8 hours is a myth"
 Needs:   pip install requests edge-tts   (+ ffmpeg and DejaVu fonts)
@@ -28,14 +28,26 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 TEXT_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite",
                "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-pro"]
 IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
-VOICE = os.environ.get("TTS_VOICE", "en-US-AndrewNeural")   # or en-US-GuyNeural, en-GB-RyanNeural
-VOICE_RATE = os.environ.get("TTS_RATE", "+8%")
+LANGS = {
+    "en": {"name": "English",   "voice": "en-US-AndrewMultilingualNeural", "words": "140-165",
+           "font": "DejaVu Serif", "size": 84},
+    "hi": {"name": "Hindi",     "voice": "hi-IN-MadhurNeural", "words": "130-155",
+           "font": "Noto Serif Devanagari", "size": 76},
+    "ml": {"name": "Malayalam", "voice": "ml-IN-MidhunNeural", "words": "95-120",
+           "font": "Noto Serif Malayalam", "size": 70},
+}
+LANG = os.environ.get("VIDEO_LANG", "en").strip().lower()
+if LANG not in LANGS:
+    sys.exit("VIDEO_LANG must be one of: " + ", ".join(LANGS))
+LC = LANGS[LANG]
+VOICE = os.environ.get("TTS_VOICE") or LC["voice"]
+VOICE_RATE = os.environ.get("TTS_RATE", "+0%")
 VOICE_PITCH = os.environ.get("TTS_PITCH", "+0Hz")
 W, H, FPS = 720, 1280, 30
 OUT = str(ROOT / "output")
 PAD = 0.25                          # silence after each scene (seconds)
-CAPTION_FONT = "DejaVu Serif"
-CAPTION_SIZE = 84
+CAPTION_FONT = LC["font"]
+CAPTION_SIZE = LC["size"]
 CAPTION_MARGIN_V = 330              # distance from bottom
 
 CAT = ("a grey anthropomorphic cat narrator wearing a grey fedora hat, dark green three-piece "
@@ -101,7 +113,11 @@ def write_script(topic, story):
         topic = ("pick a fresh surprising myth or curiosity (history, psychology, science, habits). "
                  "Do NOT repeat these earlier videos: %s" % json.dumps(used))
     prompt = """You write viral 60-second YouTube Shorts in the style of a curious grey cat detective
-who busts myths. Topic: "%s"
+who busts myths. Topic: "@@TOPIC@@"
+
+LANGUAGE: write title, description, tags and ALL narration in @@LANG@@ (natural, conversational,
+the way a friendly person actually talks; short sentences; use the native script, not
+transliteration). Keep the "image" descriptions in English.
 
 Return ONLY JSON:
 {
@@ -117,13 +133,15 @@ Return ONLY JSON:
 }
 
 Rules:
-- 10 to 12 scenes, total narration 140-165 words (about 60 seconds spoken).
+- 10 to 12 scenes, total narration @@WORDS@@ words (about 60 seconds spoken).
 - Scene 1 type "cat": a shocking hook question that makes people stay.
 - Last scene type "cat": a punchy conclusion plus a question to the viewer.
 - "story" scenes tell a short human example (a man, a bed, a clock, a village...).
 - Use 1-2 "chalk" scenes for the explanation / numbers, and 1 "collage" scene for the evidence.
-- Simple spoken English, no emojis, no stage directions in narration.
-- Image descriptions describe ONLY the picture (characters, setting, action, mood).""" % topic
+- Simple spoken @@LANG@@, no emojis, no stage directions in narration.
+- Image descriptions describe ONLY the picture (characters, setting, action, mood)."""
+    prompt = (prompt.replace("@@TOPIC@@", topic).replace("@@LANG@@", LC["name"])
+                    .replace("@@WORDS@@", LC["words"]))
     data = gemini_json(prompt)
     scenes = data["scenes"]
     if "#Shorts" not in data.get("description", ""):
@@ -221,8 +239,15 @@ def make_voice(text, mp3_path):
     for attempt in range(3):
         try:
             words = asyncio.run(_tts(text, mp3_path))
+            if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 500:
+                raise RuntimeError("empty audio")
             if words:
                 return words
+            # voice gave audio but no word timings: spread the words evenly over the audio
+            toks = text.split()
+            dur = probe_duration(mp3_path)
+            step = dur / max(len(toks), 1)
+            return [(t, i * step, (i + 1) * step) for i, t in enumerate(toks)]
         except Exception as e:
             log("  tts error:", str(e)[:120])
         time.sleep(3)
@@ -336,7 +361,8 @@ def upload(video, meta):
     token = yt_access_token()
     body = {
         "snippet": {"title": meta["title"][:95], "description": meta["description"],
-                    "tags": meta.get("tags", [])[:15], "categoryId": "24"},
+                    "tags": meta.get("tags", [])[:15], "categoryId": "24",
+                    "defaultLanguage": LANG, "defaultAudioLanguage": LANG},
         "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
     }
     init = requests.post(
@@ -423,7 +449,8 @@ def main():
     video_id = upload(final, data)
     log("uploaded https://youtu.be/%s" % video_id)
     story["bible"] = CAT
-    story["episodes"].append({"n": n, "title": data.get("title", ""), "recap": data.get("recap", "")})
+    story["episodes"].append({"n": n, "lang": LANG, "title": data.get("title", ""),
+                              "recap": data.get("recap", "")})
     STORY_FILE.write_text(json.dumps(story, indent=2))
 
 
