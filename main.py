@@ -30,17 +30,20 @@ TEXT_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite",
 IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
 LANGS = {
     "en": {"name": "English",   "voice": "en-US-AndrewMultilingualNeural", "words": "140-165",
-           "font": "DejaVu Serif", "size": 84},
+           "font": "DejaVu Serif", "size": 84, "engine": "edge"},
     "hi": {"name": "Hindi",     "voice": "hi-IN-MadhurNeural", "words": "130-155",
-           "font": "Noto Serif Devanagari", "size": 76},
+           "font": "Noto Serif Devanagari", "size": 76, "engine": "gemini"},
     "ml": {"name": "Malayalam", "voice": "ml-IN-MidhunNeural", "words": "95-120",
-           "font": "Noto Serif Malayalam", "size": 70},
+           "font": "Noto Serif Malayalam", "size": 70, "engine": "gemini"},
 }
 LANG = os.environ.get("VIDEO_LANG", "en").strip().lower()
 if LANG not in LANGS:
     sys.exit("VIDEO_LANG must be one of: " + ", ".join(LANGS))
 LC = LANGS[LANG]
 VOICE = os.environ.get("TTS_VOICE") or LC["voice"]
+TTS_ENGINE = os.environ.get("TTS_ENGINE", LC["engine"])      # "gemini" or "edge"
+GEMINI_VOICE = os.environ.get("GEMINI_VOICE", "Charon")      # try Puck, Fenrir, Orus, Kore, Aoede
+GEMINI_TTS_MODELS = ["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]
 VOICE_RATE = os.environ.get("TTS_RATE", "+0%")
 VOICE_PITCH = os.environ.get("TTS_PITCH", "+0Hz")
 W, H, FPS = 720, 1280, 30
@@ -50,16 +53,17 @@ CAPTION_FONT = LC["font"]
 CAPTION_SIZE = LC["size"]
 CAPTION_MARGIN_V = 330              # distance from bottom
 
-CAT = ("a grey anthropomorphic cat narrator wearing a grey fedora hat, dark green three-piece "
-       "suit, white shirt and a dark red tie, expressive eyes")
+CAT = ("a cute grey cartoon cat narrator wearing a grey fedora hat, dark green suit, white shirt "
+       "and dark red tie, large round friendly eyes with black pupils and white highlights, "
+       "both eyes symmetrical and looking the same direction")
 
-STYLE = ("vintage hand-drawn 1930s-40s cartoon illustration, clean ink outlines, grainy film "
-         "texture, soft vignette, vertical 9:16 composition, NO text, NO letters, NO captions, "
-         "NO watermark")
+STYLE = ("clean modern 2D cartoon illustration with a retro 1940s feel, bold smooth outlines, "
+         "sharp crisp high-detail artwork, rich colors, no film grain, no noise, no blur, "
+         "no vignette, vertical 9:16 composition, NO text, NO letters, NO captions, NO watermark")
 
 LOOKS = {
-    "cat":     "warm amber and deep red lighting, cozy vintage room, full color. Character: " + CAT,
-    "story":   "sepia black-and-white storybook scene, soft shading, dramatic candle or window light",
+    "cat":     "medium shot from the waist up, warm amber lighting, cozy retro room, full color. Character: " + CAT,
+    "story":   "muted warm storybook colors, clean sharp lines, soft window or candle light",
     "chalk":   "black chalkboard background, white chalk line-art diagram with a hand pointing a stick, "
                "simple icons (clock, magnifying glass, numbers), no words",
     "collage": "cream paper background, sticker-style paper cutouts and icons arranged as a collage, "
@@ -154,8 +158,9 @@ Rules:
 
 # ============================ IMAGES ============================
 GEMINI_IMG_OK = True     # switched off for the rest of the run if the key has no image quota
-SHORT_STYLE = ("vintage hand-drawn 1930s-40s cartoon illustration, clean ink outlines, "
-               "grainy film texture, vertical composition, no text, no letters")
+SHORT_STYLE = ("clean modern 2D cartoon illustration, retro 1940s feel, bold smooth outlines, "
+               "sharp high detail, rich colors, no grain, no noise, vertical composition, "
+               "no text, no letters")
 
 
 def gemini_image(prompt, path):
@@ -194,7 +199,7 @@ def pollinations_image(scene, idx, path):
     prompt = "%s, %s, %s" % (scene["image"], LOOKS[scene["type"]], SHORT_STYLE)
     prompt = prompt[:700]
     url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
-           "?width=%d&height=%d&nologo=true&model=flux&seed=%d" % (W, H, 1000 + idx))
+           "?width=1080&height=1920&nologo=true&model=flux&enhance=true&seed=%d" % (1000 + idx))
     for attempt in range(5):
         try:
             r = requests.get(url, timeout=180)
@@ -254,6 +259,93 @@ def make_voice(text, mp3_path):
     raise RuntimeError("TTS failed for: " + text[:50])
 
 
+def spread_words(text, dur):
+    """Approximate word timings (Gemini TTS gives none): weight by length, extra for pauses."""
+    toks = text.split()
+    weights = []
+    for t in toks:
+        w = len(t) + 1.0
+        if t[-1:] in ",;:":
+            w += 3
+        elif t[-1:] in ".?!।":
+            w += 6
+        weights.append(w)
+    total = sum(weights) or 1.0
+    lead, usable = 0.08, max(dur - 0.12, 0.1)
+    out, t = [], lead
+    for tok, w in zip(toks, weights):
+        d = usable * w / total
+        out.append((tok, t, t + d))
+        t += d
+    return out
+
+
+def gemini_tts(text, mp3_path):
+    """One scene of narration -> mp3. Returns word timings or None on failure."""
+    prompt = "Say this in a warm, natural, expressive storytelling voice, like a friendly person " \
+             "talking to a friend, with clear native %s pronunciation: %s" % (LC["name"], text)
+    for model in GEMINI_TTS_MODELS:
+        for attempt in range(4):
+            try:
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model,
+                    params={"key": API_KEY},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {
+                              "responseModalities": ["AUDIO"],
+                              "speechConfig": {"voiceConfig": {
+                                  "prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE}}}}},
+                    timeout=120)
+                if r.status_code in (429, 500, 503):
+                    log("  gemini tts %s -> %s" % (model, r.status_code))
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                if r.status_code != 200:
+                    log("  gemini tts %s -> %s %s" % (model, r.status_code, r.text[:120]))
+                    break
+                part = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+                m = re.search(r"rate=(\d+)", part.get("mimeType", ""))
+                rate = m.group(1) if m else "24000"
+                raw = mp3_path + ".pcm"
+                with open(raw, "wb") as f:
+                    f.write(base64.b64decode(part["data"]))
+                run(["ffmpeg", "-y", "-v", "error", "-f", "s16le", "-ar", rate, "-ac", "1",
+                     "-i", raw, "-ar", "44100", "-b:a", "160k", mp3_path])
+                os.remove(raw)
+                return spread_words(text, probe_duration(mp3_path))
+            except Exception as e:
+                log("  gemini tts error %s: %s" % (model, str(e)[:120]))
+                time.sleep(5)
+    return None
+
+
+def make_all_voice(scenes, work):
+    """Prefer Gemini voice for the whole video; if any scene fails, redo ALL scenes with
+    edge-tts so one video never mixes two different voices."""
+    done = False
+    if TTS_ENGINE == "gemini":
+        ok = True
+        for i, s in enumerate(scenes):
+            mp3 = os.path.join(work, "voice_%02d.mp3" % i)
+            words = gemini_tts(s["narration"], mp3)
+            if not words:
+                ok = False
+                break
+            s["words"], s["mp3"] = words, mp3
+            s["dur"] = probe_duration(mp3) + PAD
+            log("   voice %d/%d (gemini)" % (i + 1, len(scenes)))
+            time.sleep(6)          # stay under the per-minute limit
+        done = ok
+        if not ok:
+            log("  Gemini voice unavailable, using edge-tts voice for the whole video")
+    if not done:
+        for i, s in enumerate(scenes):
+            mp3 = os.path.join(work, "voice_%02d.mp3" % i)
+            s["words"] = make_voice(s["narration"], mp3)
+            s["mp3"] = mp3
+            s["dur"] = probe_duration(mp3) + PAD
+
+
 def probe_duration(path):
     out = subprocess.check_output(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -269,18 +361,24 @@ def run(cmd):
 
 
 def scene_clip(img, mp3, dur, idx, out_path):
-    frames = int(dur * FPS) + 1
-    if idx % 2 == 0:   # slow zoom in
-        z = "min(zoom+0.0007,1.18)"
-    else:              # slow zoom out
-        z = "if(eq(on,0),1.18,max(zoom-0.0007,1.0))"
-    vf = ("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-          "zoompan=z='%s':d=%d:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=%dx%d:fps=%d,"
-          "format=yuv420p") % (z, frames, W, H, FPS)
+    n = int(dur * FPS) + 1
+    mode = idx % 4
+    cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    if mode == 0:      # slow push in
+        z, x, y = "1+0.16*on/%d" % n, cx, cy
+    elif mode == 1:    # slow pull out
+        z, x, y = "1.16-0.16*on/%d" % n, cx, cy
+    elif mode == 2:    # pan left to right
+        z, x, y = "1.2", "(iw-iw/zoom)*on/%d" % n, cy
+    else:              # pan right to left
+        z, x, y = "1.2", "(iw-iw/zoom)*(1-on/%d)" % n, cy
+    # upscale first so zoompan moves smoothly (no pixel jitter)
+    vf = ("scale=2160:3840:force_original_aspect_ratio=increase:flags=lanczos,crop=2160:3840,"
+          "zoompan=z='%s':d=%d:x='%s':y='%s':s=%dx%d:fps=%d,format=yuv420p") % (z, n, x, y, W, H, FPS)
     run(["ffmpeg", "-y", "-v", "error", "-i", img, "-i", mp3,
          "-vf", vf, "-af", "apad=pad_dur=%f" % (PAD + 0.5),
          "-t", "%.3f" % dur,
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
          "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2", out_path])
 
 
@@ -424,11 +522,7 @@ def main():
         time.sleep(1.5)
 
     log("3/4 generating voice")
-    for i, s in enumerate(scenes):
-        mp3 = os.path.join(work, "voice_%02d.mp3" % i)
-        s["words"] = make_voice(s["narration"], mp3)
-        s["mp3"] = mp3
-        s["dur"] = probe_duration(mp3) + PAD
+    make_all_voice(scenes, work)
 
     log("4/4 rendering video")
     captioned = os.path.join(work, "captioned.mp4")
