@@ -7,6 +7,10 @@ on:
         description: "Topic (empty = Gemini picks)"
         required: false
         default: ""
+      language:
+        description: "Language: en, hi or ml"
+        required: false
+        default: "en"
       dry_run:
         description: "0 = upload to YouTube, 1 = build only (test)"
         required: false
@@ -31,16 +35,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install ffmpeg and fonts
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
 
       - name: Install Python packages
         run: pip install requests edge-tts
 
       - name: Build and upload episode
         env:
-          TTS_VOICE: "en-US-ChristopherNeural"
-          TTS_PITCH: "-4Hz"
-          TTS_RATE: "+0%"
+          # 05:00 UTC = English, 11:00 UTC = Hindi, 17:00 UTC = Malayalam
+          VIDEO_LANG: ${{ github.event.inputs.language || (github.event.schedule == '0 11 * * *' && 'hi') || (github.event.schedule == '0 17 * * *' && 'ml') || 'en' }}
           TOPIC: ${{ github.event.inputs.topic }}
           # manual runs follow the dry_run input (default 1); scheduled runs upload
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
