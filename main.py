@@ -15,7 +15,7 @@ Run:     python main.py            (Gemini picks a fresh topic)
          python main.py "why sleeping 8 hours is a myth"
 Needs:   pip install requests edge-tts   (+ ffmpeg and DejaVu fonts)
 """
-import os, sys, json, time, random, base64, asyncio, subprocess, re, shutil, pathlib, textwrap
+import os, sys, json, time, random, base64, asyncio, subprocess, re, shutil, pathlib, textwrap, math
 import requests
 
 # ============================ CONFIG ============================
@@ -410,29 +410,32 @@ async def _tts(text, mp3_path, voice, rate, pitch, boundary):
     return words
 
 
+VOICE_CANDIDATES = {
+    "en": ["en-US-AndrewMultilingualNeural", "en-US-BrianMultilingualNeural", "en-US-AvaMultilingualNeural",
+           "en-US-AndrewNeural", "en-US-BrianNeural", "en-US-ChristopherNeural", "en-US-GuyNeural",
+           "en-US-AriaNeural"],
+    "hi": ["hi-IN-MadhurNeural", "hi-IN-SwaraNeural"],
+    "ml": ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural"],
+}
+
+
 def make_voice(text, mp3_path):
-    """edge-tts with progressively simpler settings, because the service is picky."""
+    """edge-tts: try the best voices first, fall back to ones that work on this server."""
     global _TTS_IDX
-    cfgs = [
-        (VOICE, VOICE_RATE, VOICE_PITCH, "WordBoundary"),
-        (VOICE, VOICE_RATE, VOICE_PITCH, None),
-        (VOICE, None, None, None),
-        (FALLBACK_VOICE[LANG], None, None, None),
-    ]
-    for idx in range(_TTS_IDX, len(cfgs)):
-        voice, rate, pitch, boundary = cfgs[idx]
-        for attempt in range(2):
+    cands = ([os.environ["TTS_VOICE"]] if os.environ.get("TTS_VOICE") else []) + VOICE_CANDIDATES[LANG]
+    for sweep in range(2):
+        for idx in range(_TTS_IDX, len(cands)):
             try:
-                words = asyncio.run(_tts(text, mp3_path, voice, rate, pitch, boundary))
+                asyncio.run(_tts(text, mp3_path, cands[idx], None, None, None))
                 if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 500:
                     raise RuntimeError("empty audio")
                 if idx != _TTS_IDX:
-                    log("  voice settings #%d work (%s), using them from now on" % (idx + 1, voice))
+                    log("  using voice %s" % cands[idx])
                     _TTS_IDX = idx
-                return words or spread_words(text, probe_duration(mp3_path))
+                return spread_words(text, probe_duration(mp3_path))
             except Exception as e:
-                log("  tts error (settings #%d): %s" % (idx + 1, str(e)[:100]))
-                time.sleep(2)
+                log("  voice %s failed: %s" % (cands[idx], str(e)[:80]))
+        time.sleep(2)
     raise RuntimeError("TTS failed for: " + text[:50])
 
 
@@ -733,8 +736,8 @@ QT = {
         "header": {"countries": "GUESS COUNTRIES", "animals": "GUESS ANIMALS",
                    "fruits": "GUESS FRUITS", "cities": "GUESS CITIES"},
         "cat": {"countries": "countries", "animals": "animals", "fruits": "fruits", "cities": "cities"},
-        "intro": "Can you name {n} {cat} from missing letters? Most people can't. You get {sec} seconds each. Let's go!",
-        "outro": "How many did you get? Comment your score, and follow for a harder one tomorrow!",
+        "intro": "Name {n} {cat} from missing letters. {sec} seconds each. Go!",
+        "outro": "How many did you get? Comment your score and follow for more!",
         "title": "Can You Name {n} {cat} From Missing Letters?",
         "desc": "Guess {n} {cat} from the missing letters. Comment your score! #Shorts #quiz #brainteaser",
         "sub": "SUBSCRIBE", "hsize": 34,
@@ -1005,6 +1008,326 @@ def build_quiz(work):
     return meta, final
 
 
+# ============================ VISUAL MODES: odd-one-out + optical illusions ============================
+# Nearly language-free (symbols + a draining timer), so they work for any audience.
+VT = {
+    "en": {
+        "odd_header": "FIND THE ODD ONE", "ill_header": "OPTICAL ILLUSION", "hsize": 34,
+        "odd_intro": "Find the odd one out. You get {sec} seconds each. Go!",
+        "ill_intro": "Your eyes will lie to you. Look carefully!",
+        "outro": "How many did you get? Comment your score and follow for more!",
+        "odd_title": "Can You Find the Odd One Out in {sec} Seconds?",
+        "ill_title": "Your Eyes Will Lie To You (Optical Illusions)",
+        "odd_desc": "Find the different one before the timer ends. Comment your score! #Shorts #brainteaser #challenge",
+        "ill_desc": "Optical illusions that fool your brain. Which ones tricked you? #Shorts #opticalillusion #brainteaser",
+        "illusions": {
+            "muller": ("Which line is longer?", "SAME LENGTH!"),
+            "contrast": ("Are both squares the same color?", "SAME COLOR!"),
+            "ebbing": ("Which center circle is bigger?", "SAME SIZE!"),
+            "hering": ("Are the red lines straight?", "STRAIGHT!"),
+        },
+    },
+    "hi": {
+        "odd_header": "अलग वाला ढूँढो", "ill_header": "आँखों का धोखा", "hsize": 32,
+        "odd_intro": "अलग वाला ढूँढिए। हर बार {sec} सेकंड हैं। चलिए!",
+        "ill_intro": "आपकी आँखें आपको धोखा देंगी। ध्यान से देखिए!",
+        "outro": "आपने कितने सही बताए? कमेंट में स्कोर लिखिए और फॉलो कीजिए!",
+        "odd_title": "क्या आप {sec} सेकंड में अलग वाला ढूँढ सकते हैं?",
+        "ill_title": "आपकी आँखें आपको धोखा देंगी (ऑप्टिकल इल्यूज़न)",
+        "odd_desc": "टाइमर खत्म होने से पहले अलग वाला ढूँढिए। कमेंट में स्कोर बताइए! #Shorts #brainteaser #हिंदी",
+        "ill_desc": "ऐसे ऑप्टिकल इल्यूज़न जो दिमाग को चकमा देते हैं। आप किससे धोखा खाए? #Shorts #opticalillusion #हिंदी",
+        "illusions": {
+            "muller": ("कौन सी लाइन लंबी है?", "दोनों बराबर हैं!"),
+            "contrast": ("क्या दोनों चौकोर एक ही रंग के हैं?", "एक ही रंग!"),
+            "ebbing": ("बीच का कौन सा गोला बड़ा है?", "एक ही आकार!"),
+            "hering": ("क्या लाल लाइनें सीधी हैं?", "बिल्कुल सीधी!"),
+        },
+    },
+    "ml": {
+        "odd_header": "വ്യത്യസ്തമായത് കണ്ടെത്തൂ", "ill_header": "കണ്ണിന്റെ മായക്കാഴ്ച", "hsize": 28,
+        "odd_intro": "വ്യത്യസ്തമായത് കണ്ടെത്തൂ. ഓരോ തവണയും {sec} സെക്കൻഡ് ഉണ്ട്. തുടങ്ങാം!",
+        "ill_intro": "നിങ്ങളുടെ കണ്ണുകൾ നിങ്ങളെ പറ്റിക്കും. ശ്രദ്ധിച്ച് നോക്കൂ!",
+        "outro": "എത്രയെണ്ണം ശരിയായി പറഞ്ഞു? കമന്റിൽ സ്കോർ എഴുതൂ, ഫോളോ ചെയ്യൂ!",
+        "odd_title": "{sec} സെക്കൻഡിൽ വ്യത്യസ്തമായത് കണ്ടെത്താമോ?",
+        "ill_title": "നിങ്ങളുടെ കണ്ണുകൾ നിങ്ങളെ പറ്റിക്കും (ഒപ്റ്റിക്കൽ ഇല്യൂഷൻ)",
+        "odd_desc": "ടൈമർ തീരും മുൻപ് വ്യത്യസ്തമായത് കണ്ടെത്തൂ. കമന്റിൽ സ്കോർ പറയൂ! #Shorts #brainteaser #malayalam",
+        "ill_desc": "തലച്ചോറിനെ പറ്റിക്കുന്ന ഒപ്റ്റിക്കൽ ഇല്യൂഷനുകൾ. ഏതാണ് നിങ്ങളെ പറ്റിച്ചത്? #Shorts #opticalillusion #malayalam",
+        "illusions": {
+            "muller": ("ഏത് വര നീളമുള്ളതാണ്?", "രണ്ടും തുല്യമാണ്!"),
+            "contrast": ("രണ്ട് ചതുരങ്ങളും ഒരേ നിറമാണോ?", "ഒരേ നിറം!"),
+            "ebbing": ("നടുവിലെ ഏത് വൃത്തമാണ് വലുത്?", "ഒരേ വലിപ്പം!"),
+            "hering": ("ചുവന്ന വരകൾ നേരെയാണോ?", "നേരെയാണ്!"),
+        },
+    },
+}
+ODD_PAIRS = [("O", "Q"), ("E", "F"), ("P", "R"), ("C", "G"), ("M", "N"), ("U", "V"),
+             ("B", "8"), ("S", "5"), ("D", "O"), ("h", "n")]
+GREEN, WHITE, RED, GRAY = "50E050", "FFFFFF", "0000FF", "808080"
+
+
+def p_poly(pts):
+    return "m %d %d " % pts[0] + " ".join("l %d %d" % p for p in pts[1:])
+
+
+def p_line(x1, y1, x2, y2, th):
+    dx, dy = x2 - x1, y2 - y1
+    ln = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / ln * th / 2.0, dx / ln * th / 2.0
+    return p_poly([(x1 + nx, y1 + ny), (x2 + nx, y2 + ny), (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)])
+
+
+def p_rect(x, y, w, h):
+    return p_poly([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+
+
+def p_circle(cx, cy, r):
+    k = r * 0.5523
+    return ("m %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d"
+            % (cx - r, cy, cx - r, cy - k, cx - k, cy - r, cx, cy - r,
+               cx + k, cy - r, cx + r, cy - k, cx + r, cy,
+               cx + r, cy + k, cx + k, cy + r, cx, cy + r,
+               cx - k, cy + r, cx - r, cy + k, cx - r, cy))
+
+
+def shape(layer, st, en, path, color, ring=0):
+    """ring=0: filled shape, ring>0: outline only with that thickness."""
+    if ring:
+        tag = "{\\an7\\pos(0,0)\\p1\\1a&HFF&\\bord%d\\3c&H%s&\\shad0}" % (ring, color)
+    else:
+        tag = "{\\an7\\pos(0,0)\\p1\\bord0\\shad0\\1c&H%s&}" % color
+    return _ev(layer, st, en, "D", tag + path + "{\\p0}")
+
+
+def ass_head(hsize):
+    def style(name, font, size, color, align, outline):
+        return ("Style: %s,%s,%d,%s,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,%d,2,%d,20,20,20,1"
+                % (name, font, size, color, outline, align))
+    head = ("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nWrapStyle: 2\n\n"
+            "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,"
+            "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,"
+            "Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n" % (W, H))
+    head += "\n".join([
+        style("D", LATIN_FONT, 20, "&H00FFFFFF", 7, 0),
+        style("H", CAPTION_FONT, hsize, "&H00FFFFFF", 5, 0),
+        style("P", LATIN_FONT, 96, "&H0000FFFF", 5, 6),
+        style("I", CAPTION_FONT, 56, "&H0000FFFF", 5, 5),
+        style("G", LATIN_FONT, 40, "&H00FFFFFF", 5, 0),
+        style("S", CAPTION_FONT, 28, "&H00FFFFFF", 5, 0),
+    ]) + "\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
+    return head
+
+
+def make_audio(work, intro_text, outro_text, round_voice, round_len, timer):
+    """round_voice: per round, a list of (text, offset_seconds). Returns the mixed audio and timings."""
+    run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=1100:duration=0.06",
+         "-af", "afade=t=out:st=0.03:d=0.03,volume=0.5,aformat=sample_rates=44100:channel_layouts=stereo",
+         os.path.join(work, "tick.wav")])
+    run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=1320:duration=0.5",
+         "-af", "afade=t=out:st=0.05:d=0.45,volume=0.6,aformat=sample_rates=44100:channel_layouts=stereo",
+         os.path.join(work, "ding.wav")])
+    state = {"ok": True}
+
+    def speak(text, name):
+        if not state["ok"] or not text:
+            return None
+        mp3 = os.path.join(work, name + ".mp3")
+        try:
+            make_voice(text, mp3)
+            return mp3
+        except Exception as e:
+            log("  voice unavailable, continuing without narration:", str(e)[:100])
+            state["ok"] = False
+            return None
+
+    def edge_seg(text, name, pad, fallback_len):
+        mp3 = speak(text, name)
+        out = os.path.join(work, "seg_%s.wav" % name)
+        if mp3:
+            ln = probe_duration(mp3) + pad
+            _wav(["-i", mp3], out, "apad", ln)
+            return out, ln, spread_words(text, ln - pad)
+        _wav(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"], out, None, fallback_len)
+        return out, fallback_len, spread_words(text, fallback_len)
+
+    segs = []
+    seg, intro_len, intro_words = edge_seg(intro_text, "intro", 0.5, 5.0)
+    segs.append(seg)
+    nticks = max(1, int(timer))
+    for i, lines in enumerate(round_voice):
+        ins = ["-f", "lavfi", "-t", "%.2f" % round_len, "-i", "anullsrc=r=44100:cl=stereo",
+               "-i", os.path.join(work, "tick.wav"), "-i", os.path.join(work, "ding.wav")]
+        parts = ["[1:a]asplit=%d%s" % (nticks, "".join("[k%d]" % k for k in range(nticks)))
+                 if nticks > 1 else "[1:a]anull[k0]"]
+        labels = ["[0:a]"]
+        for k in range(nticks):
+            ms = int((0.4 + k) * 1000)
+            parts.append("[k%d]adelay=%d|%d[t%d]" % (k, ms, ms, k))
+            labels.append("[t%d]" % k)
+        dms = int(timer * 1000)
+        parts.append("[2:a]adelay=%d|%d[dg]" % (dms, dms))
+        labels.append("[dg]")
+        idx = 3
+        for j, (text, off) in enumerate(lines):
+            vmp3 = speak(text, "r%02d_%d" % (i, j))
+            if vmp3:
+                ins += ["-i", vmp3]
+                ms = int(off * 1000)
+                parts.append("[%d:a]adelay=%d|%d,volume=1.5[v%d]" % (idx, ms, ms, j))
+                labels.append("[v%d]" % j)
+                idx += 1
+        parts.append("%samix=inputs=%d:duration=longest:normalize=0[o]" % ("".join(labels), len(labels)))
+        out = os.path.join(work, "seg_r%02d.wav" % i)
+        run(["ffmpeg", "-y", "-v", "error"] + ins + ["-filter_complex", ";".join(parts), "-map", "[o]",
+             "-t", "%.3f" % round_len, "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", out])
+        segs.append(out)
+    seg, outro_len, outro_words = edge_seg(outro_text, "outro", 0.6, 5.0)
+    segs.append(seg)
+    lst = os.path.join(work, "audio.txt")
+    with open(lst, "w") as f:
+        for sgm in segs:
+            f.write("file '%s'\n" % os.path.basename(sgm))
+    audio = os.path.join(work, "audio.wav")
+    run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", audio])
+    return audio, intro_len, outro_len, intro_words, outro_words
+
+
+def build_visual(kind, work):
+    """kind: 'oddone' or 'illusion'. Returns (meta, final_path)."""
+    L = VT[LANG]
+    rng = random.Random()
+    timer = 5.0 if kind == "oddone" else 5.0
+    reveal = 2.5 if kind == "oddone" else 3.5
+    round_len = timer + reveal
+    rounds, round_voice = [], []
+    if kind == "oddone":
+        header = L["odd_header"]
+        grids = [(5, 6), (6, 7), (7, 8), (8, 9)]
+        for i, (a, b) in enumerate(random.sample(ODD_PAIRS, len(grids))):
+            cols, rows = grids[i]
+            if rng.random() < 0.5:
+                a, b = b, a
+            rounds.append({"cols": cols, "rows": rows, "base": a, "odd": b,
+                           "pos": (rng.randrange(rows), rng.randrange(cols))})
+            round_voice.append([])
+        intro_text = L["odd_intro"].format(sec=int(timer))
+        title = L["odd_title"].format(sec=int(timer))
+        desc = L["odd_desc"]
+        tags = ["brain teaser", "find the odd one out", "challenge", "puzzle", "shorts", "visual test"]
+    else:
+        header = L["ill_header"]
+        for key in random.sample(["muller", "contrast", "ebbing", "hering"], 3):
+            q, a = L["illusions"][key]
+            rounds.append({"key": key, "q": q, "a": a})
+            round_voice.append([(q, 0.2), (a, timer + 0.15)])
+        intro_text = L["ill_intro"]
+        title = L["ill_title"]
+        desc = L["ill_desc"]
+        tags = ["optical illusion", "illusion", "brain teaser", "eye test", "shorts", "mind trick"]
+
+    log("1/3 %s: %d rounds" % (kind, len(rounds)))
+    log("2/3 voice and sounds")
+    audio, intro_len, outro_len, intro_words, outro_words = make_audio(
+        work, intro_text, L["outro"], round_voice, round_len, timer)
+    total = intro_len + len(rounds) * round_len + outro_len
+    outro_start = intro_len + len(rounds) * round_len
+
+    ev = [_pill(0, total, 110, 70, 500, 68, "4F11E0"), _ev(1, 0, total, "H", "{\\pos(360,104)}%s" % header)]
+
+    def words_events(words, off, end):
+        for i, (w, a, b) in enumerate(words):
+            st = off + a
+            nxt = off + words[i + 1][1] if i + 1 < len(words) else end
+            ev.append(_ev(1, st, max(nxt, st + 0.05), "I",
+                          "{\\pos(360,270)\\fs64}%s" % w.replace("{", "").replace("}", "")))
+
+    words_events(intro_words, 0.0, intro_len)
+    words_events(outro_words, outro_start, total)
+    wrap = 18 if LANG == "en" else 13
+
+    for i, rd in enumerate(rounds):
+        st = intro_len + i * round_len
+        mid, en = st + timer, st + round_len
+        ev.append(_pill(st, en, 160, 350, 400, 34, "E6D317", 0, "\\bord2\\3c&H000000&"))
+        ev.append(_pill(st, mid, 160, 350, 400, 34, "0B9EF5", 1,
+                        "\\bord2\\3c&H000000&\\fscx100\\t(0,%d,\\fscx0)" % int(timer * 1000)))
+        if kind == "oddone":
+            ev.append(_ev(1, st, en, "P", "{\\pos(360,270)}%d / %d" % (i + 1, len(rounds))))
+            cols, rows = rd["cols"], rd["rows"]
+            cell = min(640 // cols, 740 // rows)
+            x0 = (W - cols * cell) // 2
+            y0 = 430 + (740 - rows * cell) // 2
+            fs = int(cell * 0.74)
+            for r in range(rows):
+                for c in range(cols):
+                    ch = rd["odd"] if (r, c) == rd["pos"] else rd["base"]
+                    cx, cy = x0 + c * cell + cell // 2, y0 + r * cell + cell // 2
+                    ev.append(_ev(1, st, en, "G", "{\\pos(%d,%d)\\fs%d}%s" % (cx, cy, fs, ch)))
+            r, c = rd["pos"]
+            cx, cy = x0 + c * cell + cell // 2, y0 + r * cell + cell // 2
+            ev.append(_ev(3, mid, en, "G", "{\\pos(%d,%d)\\fs%d\\1c&H%s&}%s" % (cx, cy, fs, GREEN, rd["odd"])))
+            ev.append(shape(2, mid, en, p_circle(cx, cy, int(cell * 0.62)), GREEN, ring=7))
+        else:
+            q = "\\N".join(textwrap.wrap(rd["q"], width=wrap))
+            a = "\\N".join(textwrap.wrap(rd["a"], width=wrap))
+            ev.append(_ev(1, st, mid, "I", "{\\pos(360,250)}%s" % q))
+            ev.append(_ev(1, mid, en, "I", "{\\pos(360,250)\\1c&H%s&}%s" % (GREEN, a)))
+            key = rd["key"]
+            if key == "muller":
+                xl, xr = 170, 550
+                for (y, outward) in ((650, False), (900, True)):
+                    ev.append(shape(1, st, en, p_line(xl, y, xr, y, 10), WHITE))
+                    for (xe, sgn) in ((xl, 1), (xr, -1)):
+                        s2 = sgn if not outward else -sgn
+                        for sy in (-29, 29):
+                            ev.append(shape(1, st, mid, p_line(xe, y, xe + s2 * 41, y + sy, 8), WHITE))
+                ev.append(shape(2, mid, en, p_line(xl, 540, xl, 1010, 5), GREEN))
+                ev.append(shape(2, mid, en, p_line(xr, 540, xr, 1010, 5), GREEN))
+            elif key == "contrast":
+                ev.append(shape(1, st, mid, p_rect(40, 540, 320, 400), "202020"))
+                ev.append(shape(1, st, mid, p_rect(360, 540, 320, 400), "E6E6E6"))
+                ev.append(shape(1, st, en, p_rect(135, 680, 130, 130), GRAY))
+                ev.append(shape(1, st, en, p_rect(455, 680, 130, 130), GRAY))
+                ev.append(shape(1, mid, en, p_rect(265, 700, 190, 90), GRAY))
+            elif key == "ebbing":
+                cl, cr, cy = 190, 530, 780
+                for k in range(6):
+                    ang = k * math.pi / 3
+                    ev.append(shape(1, st, mid, p_circle(int(cl + 108 * math.cos(ang)), int(cy + 108 * math.sin(ang)), 58), "F6823B"))
+                for k in range(8):
+                    ang = k * math.pi / 4
+                    ev.append(shape(1, st, mid, p_circle(int(cr + 70 * math.cos(ang)), int(cy + 70 * math.sin(ang)), 16), "F6823B"))
+                ev.append(shape(2, st, en, p_circle(cl, cy, 42), "23A6F5"))
+                ev.append(shape(2, st, en, p_circle(cr, cy, 42), "23A6F5"))
+                ev.append(shape(3, mid, en, p_circle(cl, cy, 46), GREEN, ring=5))
+                ev.append(shape(3, mid, en, p_circle(cr, cy, 46), GREEN, ring=5))
+            else:  # hering
+                cx, cy = 360, 790
+                for k in range(24):
+                    ang = k * math.pi / 12
+                    ev.append(shape(1, st, mid, p_line(cx, cy, cx + 330 * math.cos(ang), cy + 330 * math.sin(ang), 4), "909090"))
+                ev.append(shape(2, st, en, p_line(100, cy - 65, 620, cy - 65, 12), RED))
+                ev.append(shape(2, st, en, p_line(100, cy + 65, 620, cy + 65, 12), RED))
+        if i == 1:
+            ev.append(_pill(st, en, 430, 1160, 220, 58, "4F11E0", 0))
+            ev.append(_ev(1, st, en, "S", "{\\pos(540,1189)}%s" % QT[LANG]["sub"]))
+
+    log("3/3 rendering video")
+    assf = os.path.join(work, "visual.ass")
+    with open(assf, "w", encoding="utf-8") as f:
+        f.write(ass_head(L["hsize"]) + "\n".join(ev) + "\n")
+    bg = os.path.join(work, "bg.png")
+    make_bg(bg)
+    captioned = os.path.join(work, "visual_video.mp4")
+    run(["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(FPS), "-i", bg, "-i", audio,
+         "-vf", "ass=%s,format=yuv420p" % assf, "-t", "%.3f" % total,
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", captioned])
+    final = os.path.join(OUT, "video.mp4")
+    add_music(captioned, final)
+    meta = {"title": title, "description": desc, "tags": tags, "recap": "%s video" % kind}
+    return meta, final
+
+
 def main():
     if not API_KEY:
         sys.exit("Set GEMINI_KEY")
@@ -1020,10 +1343,10 @@ def main():
     n = len(story["episodes"]) + 1
     work = os.path.join(OUT, "work")
     plan = os.path.join(work, "plan.json")
-    if VIDEO_MODE == "quiz":
+    if VIDEO_MODE in ("quiz", "oddone", "illusion"):
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
-        meta, final = build_quiz(work)
+        meta, final = build_quiz(work) if VIDEO_MODE == "quiz" else build_visual(VIDEO_MODE, work)
         with open(os.path.join(OUT, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
         log("built quiz episode %d: %s (%.1fs)" % (n, final, probe_duration(final)))
