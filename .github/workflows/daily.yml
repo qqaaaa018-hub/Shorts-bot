@@ -3,12 +3,12 @@ name: shorts-bot
 on:
   workflow_dispatch:
     inputs:
-      topic:
-        description: "Topic (empty = Gemini picks)"
+      mode:
+        description: "quiz, oddone or illusion"
         required: false
-        default: ""
+        default: "quiz"
       language:
-        description: "Language: en, hi or ml"
+        description: "Language: en"
         required: false
         default: "en"
       dry_run:
@@ -16,9 +16,9 @@ on:
         required: false
         default: "0"
   schedule:
-    - cron: "0 5 * * *"    # 09:00 Dubai
-    - cron: "0 11 * * *"   # 15:00 Dubai
-    - cron: "0 17 * * *"   # 21:00 Dubai
+    - cron: "0 5 * * *"    # 09:00 Dubai  -> missing-letters quiz
+    - cron: "0 11 * * *"   # 15:00 Dubai  -> find the odd one out
+    - cron: "0 17 * * *"   # 21:00 Dubai  -> optical illusion
 
 permissions:
   contents: write
@@ -42,26 +42,24 @@ jobs:
 
       - name: Build and upload episode
         env:
-          # 05:00 UTC = English, 11:00 UTC = Hindi, 17:00 UTC = Malayalam
-          VIDEO_LANG: ${{ github.event.inputs.language || (github.event.schedule == '0 11 * * *' && 'hi') || (github.event.schedule == '0 17 * * *' && 'ml') || 'en' }}
-          TOPIC: ${{ github.event.inputs.topic }}
-          # manual runs follow the dry_run input (default 1); scheduled runs upload
+          # one language for the whole channel (change the default above or set a repo variable)
+          VIDEO_LANG: ${{ github.event.inputs.language || 'en' }}
+          VIDEO_MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 11 * * *' && 'oddone') || (github.event.schedule == '0 17 * * *' && 'illusion') || 'quiz' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
           YT_REFRESH: ${{ secrets.YT_REFRESH }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
           for i in 1 2; do
-            RESUME=$([ "$i" = "1" ] && echo 0 || echo 1) python main.py && exit 0
+            python main.py && exit 0
             rc=$?
-            # 3 = YouTube login broken, 4 = no working image source: retrying will not help
-            if [ $rc -eq 3 ] || [ $rc -eq 4 ]; then exit $rc; fi
-            echo "attempt $i failed, waiting 2 min (next try reuses script + images)"; sleep 120
+            # 3 = YouTube login broken: retrying will not help
+            if [ $rc -eq 3 ]; then exit $rc; fi
+            echo "attempt $i failed, waiting 2 min"; sleep 120
           done
           exit 1
+
       - name: Keep the video file
         if: always()
         uses: actions/upload-artifact@v4
