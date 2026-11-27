@@ -260,6 +260,12 @@
       "lang": "en",
       "title": "Can You Name 10 cities From Missing Letters?",
       "recap": "quiz: cities (Nairobi, Chennai, Toronto, Madrid, Dubai, Delhi, Karachi, Miami, Berlin, Bangkok)"
+    },
+    {
+      "n": 45,
+      "lang": "en",
+      "title": "Can You Find the Odd One Out in 5 Seconds?",
+      "recap": "oddone video"
     }
   ]
 }
