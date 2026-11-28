@@ -278,6 +278,12 @@
       "lang": "en",
       "title": "Can You Name 10 fruits From Missing Letters?",
       "recap": "quiz: fruits (Apple, Orange, Apricot, Cherry, Lychee, Grapes, Cranberry, Lemon, Pineapple, Guava)"
+    },
+    {
+      "n": 48,
+      "lang": "en",
+      "title": "Can You Find the Odd One Out in 5 Seconds?",
+      "recap": "oddone video"
     }
   ]
 }
